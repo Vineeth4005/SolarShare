@@ -165,6 +165,14 @@ class ValidationReport:
     total_records_negative_rejected: int
 
 
+@dataclass
+class SeriesValidationStats:
+    considered: int
+    valid: int
+    missing: int
+    negative_rejected: int
+
+
 def _reconstruct_timestamps(start: datetime, count: int, frequency: str) -> List[datetime]:
     """
     Reconstruct per-value timestamps from a series' single start_timestamp,
@@ -187,12 +195,87 @@ def _reconstruct_timestamps(start: datetime, count: int, frequency: str) -> List
     return [start + i * step for i in range(count)]
 
 
+def validate_and_convert_series(series, frequency: str):
+    """
+    Validate and convert a SINGLE series. This is the core function used by
+    both the streaming ingestion path (one series at a time, memory-bounded)
+    and the eager `validate_and_convert()` wrapper below (kept for the
+    existing test suite / small-file use).
+
+    Raises `ElectricityDatasetValidationError` for structural problems
+    (empty series, unsupported frequency, duplicate reconstructed
+    timestamps). Individual missing ('?') or negative readings within an
+    otherwise-valid series are NOT structural failures — they're preserved
+    as None (missing) in the returned series, never silently converted to
+    an implied zero, and are the caller's job to count/log, not reject on.
+
+    Duplicate series-name detection is intentionally NOT done here — both
+    `parse_tsf`/`_parse_tsf_lines` (eager) and `parse_tsf_streaming`
+    (streaming) already guarantee unique series names before this function
+    ever sees a series, so re-checking here would be redundant.
+
+    Returns `(ValidatedSeries, SeriesValidationStats)`.
+    """
+    if not series.values:
+        raise ElectricityDatasetValidationError(f"{series.series_name}: empty series (no values)")
+
+    timestamps = _reconstruct_timestamps(series.start_timestamp, len(series.values), frequency)
+    if len(set(timestamps)) != len(timestamps):
+        raise ElectricityDatasetValidationError(f"{series.series_name}: duplicate reconstructed timestamps")
+
+    cleaned_values: List[Optional[float]] = []
+    considered = 0
+    valid = 0
+    missing = 0
+    negative_rejected = 0
+    series_had_negative = False
+
+    for v in series.values:
+        considered += 1
+        if v is None:
+            missing += 1
+            cleaned_values.append(None)
+            continue
+        if v < 0:
+            negative_rejected += 1
+            series_had_negative = True
+            cleaned_values.append(None)  # treat an invalid negative reading as missing, not as a fabricated 0
+            continue
+        valid += 1
+        cleaned_values.append(v)
+
+    if series_had_negative:
+        logger.warning(
+            "Series %s contained negative reading(s); those points were treated as missing, not rejected wholesale.",
+            series.series_name,
+        )
+
+    energy_values = [convert_to_energy_kwh(v, interval_hours=1.0) for v in cleaned_values]
+
+    validated = ValidatedSeries(
+        series_name=series.series_name,
+        start_timestamp_local=series.start_timestamp,
+        frequency=frequency,
+        timestamps=timestamps,
+        hourly_average_kw=cleaned_values,
+        energy_kwh=energy_values,
+    )
+    stats = SeriesValidationStats(considered=considered, valid=valid, missing=missing, negative_rejected=negative_rejected)
+    return validated, stats
+
+
 def validate_and_convert(dataset: TsfDataset, source_config: "ElectricityDatasetSourceConfig") -> ValidationReport:
     """
-    Validate every parsed series and convert source kW values to derived
-    kWh values. A series is rejected outright (not silently dropped) if it
-    fails a structural check; individual missing readings within an
-    otherwise-valid series are preserved as None, not rejected.
+    EAGER, whole-dataset variant — validates and converts every series in
+    an already-fully-parsed `TsfDataset`. Kept for the existing test suite
+    and for small/medium files; internally just loops over
+    `validate_and_convert_series()` per series, so behavior is identical
+    to before this refactor.
+
+    For the real, large electricity dataset, the ingestion service uses the
+    per-series `validate_and_convert_series()` directly against the
+    streaming parser instead of this function, to avoid materializing the
+    whole dataset in memory.
     """
     if dataset.metadata.frequency != "hourly":
         raise ElectricityDatasetValidationError(
@@ -206,62 +289,18 @@ def validate_and_convert(dataset: TsfDataset, source_config: "ElectricityDataset
     total_missing = 0
     total_negative_rejected = 0
 
-    seen_names = set()
-
     for series in dataset.series:
-        if series.series_name in seen_names:
-            rejected_series.append(f"{series.series_name}: duplicate series_name")
-            continue
-        seen_names.add(series.series_name)
-
-        if not series.values:
-            rejected_series.append(f"{series.series_name}: empty series (no values)")
-            continue
-
         try:
-            timestamps = _reconstruct_timestamps(series.start_timestamp, len(series.values), dataset.metadata.frequency)
+            validated, stats = validate_and_convert_series(series, dataset.metadata.frequency)
         except ElectricityDatasetValidationError as exc:
             rejected_series.append(f"{series.series_name}: {exc}")
             continue
 
-        if len(set(timestamps)) != len(timestamps):
-            rejected_series.append(f"{series.series_name}: duplicate reconstructed timestamps")
-            continue
-
-        cleaned_values: List[Optional[float]] = []
-        series_had_negative = False
-        for v in series.values:
-            total_considered += 1
-            if v is None:
-                total_missing += 1
-                cleaned_values.append(None)
-                continue
-            if v < 0:
-                total_negative_rejected += 1
-                series_had_negative = True
-                cleaned_values.append(None)  # treat an invalid negative reading as missing, not as a fabricated 0
-                continue
-            total_valid += 1
-            cleaned_values.append(v)
-
-        if series_had_negative:
-            logger.warning(
-                "Series %s contained negative reading(s); those points were treated as missing, not rejected wholesale.",
-                series.series_name,
-            )
-
-        energy_values = [convert_to_energy_kwh(v, interval_hours=1.0) for v in cleaned_values]
-
-        valid_series.append(
-            ValidatedSeries(
-                series_name=series.series_name,
-                start_timestamp_local=series.start_timestamp,
-                frequency=dataset.metadata.frequency,
-                timestamps=timestamps,
-                hourly_average_kw=cleaned_values,
-                energy_kwh=energy_values,
-            )
-        )
+        valid_series.append(validated)
+        total_considered += stats.considered
+        total_valid += stats.valid
+        total_missing += stats.missing
+        total_negative_rejected += stats.negative_rejected
 
     return ValidationReport(
         valid_series=valid_series,

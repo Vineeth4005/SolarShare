@@ -123,6 +123,20 @@ def test_ingestion_with_missing_values_persists_none_not_zero(db_session):
     assert kwh_values == [10.5, None, 12.3, 0.0, 15.7, None]
 
 
+def test_ingestion_resolves_path_from_settings_when_not_passed_explicitly(db_session, monkeypatch):
+    """
+    Confirms ELECTRICITY_DATASET_LOCAL_PATH (settings.electricity_dataset_local_path)
+    is actually used when ingest_electricity_dataset() is called WITHOUT an
+    explicit local_path argument -- this is exactly how it will be invoked
+    against the real dataset path on the user's machine.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "electricity_dataset_local_path", FIXTURE_PATH)
+    summary = ingest_electricity_dataset(db_session)  # no local_path argument passed
+    assert summary["series_persisted"] == 12
+
+
 def test_ingestion_raises_clear_error_for_missing_local_file(db_session, monkeypatch):
     from app.integrations.electricity_dataset import ElectricityDatasetAcquisitionError
     from app.core.config import settings

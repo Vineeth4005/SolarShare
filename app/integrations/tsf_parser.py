@@ -115,7 +115,13 @@ def _parse_value(raw: str) -> Optional[float]:
 def parse_tsf(source: Union[str, TextIO]) -> TsfDataset:
     """
     Parse .tsf content from either a file path (str) or an already-open
-    text stream, returning a fully-parsed `TsfDataset`.
+    text stream, returning a fully-parsed `TsfDataset` with ALL series
+    materialized in memory.
+
+    For large files (e.g. the real ~8.4M-observation electricity dataset),
+    prefer `parse_tsf_streaming()` below instead — this eager function is
+    kept for the existing test suite and for small/medium files where
+    holding everything in memory is not a concern.
     """
     if isinstance(source, str):
         with open(source, "r", encoding="utf-8") as fh:
@@ -123,7 +129,13 @@ def parse_tsf(source: Union[str, TextIO]) -> TsfDataset:
     return _parse_tsf_lines(source)
 
 
-def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
+def _consume_header(fh: TextIO) -> TsfMetadata:
+    """
+    Read and parse only the header block (comments + @-directives) up
+    through and including the `@data` line, leaving `fh`'s read position
+    at the start of the first data line. Does not touch any data lines —
+    cheap regardless of file size.
+    """
     header_comments: List[str] = []
     relation: Optional[str] = None
     attributes: List[tuple] = []
@@ -131,8 +143,6 @@ def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
     horizon: Optional[int] = None
     missing: Optional[bool] = None
     equallength: Optional[bool] = None
-
-    series_list: List[TsfSeries] = []
     in_data_section = False
 
     for raw_line in fh:
@@ -140,50 +150,34 @@ def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
         if not line:
             continue
 
-        if not in_data_section:
-            if line.startswith("#"):
-                header_comments.append(line[1:].strip())
-                continue
-            if line.startswith("@relation"):
-                relation = line.split(maxsplit=1)[1].strip()
-                continue
-            if line.startswith("@attribute"):
-                parts = line.split()
-                if len(parts) < 3:
-                    raise TsfParseError(f"Malformed @attribute line: {line!r}")
-                attributes.append((parts[1], parts[2]))
-                continue
-            if line.startswith("@frequency"):
-                frequency = line.split(maxsplit=1)[1].strip()
-                continue
-            if line.startswith("@horizon"):
-                horizon = int(line.split(maxsplit=1)[1].strip())
-                continue
-            if line.startswith("@missing"):
-                missing = line.split(maxsplit=1)[1].strip().lower() == "true"
-                continue
-            if line.startswith("@equallength"):
-                equallength = line.split(maxsplit=1)[1].strip().lower() == "true"
-                continue
-            if line.startswith("@data"):
-                in_data_section = True
-                continue
-            # Any other unrecognized non-empty pre-@data line is a format error.
-            raise TsfParseError(f"Unrecognized header line before @data: {line!r}")
-
-        # --- @data section: "series_name:start_timestamp:v1,v2,v3,..." ---
-        parts = line.split(":", 2)
-        if len(parts) != 3:
-            raise TsfParseError(f"Malformed data line (expected 3 colon-separated fields): {line!r}")
-        series_name, ts_raw, values_raw = parts
-        series_name = series_name.strip()
-        if not series_name:
-            raise TsfParseError(f"Empty series_name in data line: {line!r}")
-
-        start_ts = _parse_timestamp(ts_raw)
-        values = [_parse_value(v) for v in values_raw.split(",")] if values_raw.strip() else []
-
-        series_list.append(TsfSeries(series_name=series_name, start_timestamp=start_ts, values=values))
+        if line.startswith("#"):
+            header_comments.append(line[1:].strip())
+            continue
+        if line.startswith("@relation"):
+            relation = line.split(maxsplit=1)[1].strip()
+            continue
+        if line.startswith("@attribute"):
+            parts = line.split()
+            if len(parts) < 3:
+                raise TsfParseError(f"Malformed @attribute line: {line!r}")
+            attributes.append((parts[1], parts[2]))
+            continue
+        if line.startswith("@frequency"):
+            frequency = line.split(maxsplit=1)[1].strip()
+            continue
+        if line.startswith("@horizon"):
+            horizon = int(line.split(maxsplit=1)[1].strip())
+            continue
+        if line.startswith("@missing"):
+            missing = line.split(maxsplit=1)[1].strip().lower() == "true"
+            continue
+        if line.startswith("@equallength"):
+            equallength = line.split(maxsplit=1)[1].strip().lower() == "true"
+            continue
+        if line.startswith("@data"):
+            in_data_section = True
+            break
+        raise TsfParseError(f"Unrecognized header line before @data: {line!r}")
 
     if relation is None or frequency is None or missing is None or equallength is None:
         raise TsfParseError(
@@ -192,7 +186,7 @@ def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
     if not in_data_section:
         raise TsfParseError("No @data section found in .tsf content.")
 
-    metadata = TsfMetadata(
+    return TsfMetadata(
         relation=relation,
         attributes=attributes,
         frequency=frequency,
@@ -201,6 +195,31 @@ def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
         equallength=equallength,
         header_comments=header_comments,
     )
+
+
+def _parse_data_line(line: str) -> TsfSeries:
+    parts = line.split(":", 2)
+    if len(parts) != 3:
+        raise TsfParseError(f"Malformed data line (expected 3 colon-separated fields): {line!r}")
+    series_name, ts_raw, values_raw = parts
+    series_name = series_name.strip()
+    if not series_name:
+        raise TsfParseError(f"Empty series_name in data line: {line!r}")
+
+    start_ts = _parse_timestamp(ts_raw)
+    values = [_parse_value(v) for v in values_raw.split(",")] if values_raw.strip() else []
+    return TsfSeries(series_name=series_name, start_timestamp=start_ts, values=values)
+
+
+def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
+    metadata = _consume_header(fh)
+
+    series_list: List[TsfSeries] = []
+    for raw_line in fh:
+        line = raw_line.rstrip("\n").rstrip("\r")
+        if not line:
+            continue
+        series_list.append(_parse_data_line(line))
 
     # Duplicate series-name validation (a data-quality check, not just a
     # format check) — each series must appear exactly once.
@@ -220,3 +239,65 @@ def _parse_tsf_lines(fh: TextIO) -> TsfDataset:
             )
 
     return TsfDataset(metadata=metadata, series=series_list)
+
+
+def parse_tsf_streaming(source: Union[str, TextIO]):
+    """
+    Parse .tsf content WITHOUT materializing all series in memory at once.
+
+    Returns `(metadata, series_iterator)`. `metadata` is available
+    immediately (the header block is small and read eagerly). The second
+    element is a generator that yields one `TsfSeries` at a time as the
+    file is read — at no point does this function hold more than one
+    series' values in memory simultaneously (aside from the small
+    bookkeeping needed for duplicate-name and equal-length validation).
+
+    Equivalent validation to the eager `parse_tsf()`/`_parse_tsf_lines()`
+    path (duplicate series names, @equallength consistency) is performed
+    INCREMENTALLY as series are consumed, raising `TsfParseError` from
+    within the generator at the point a violation is found, rather than
+    only after the whole file has been read.
+
+    If `source` is a file path (str), the file is opened here and closed
+    automatically once the generator is exhausted or garbage-collected
+    (via a try/finally in the generator body) — the caller does not need
+    to manage the file handle.
+    """
+    if isinstance(source, str):
+        fh = open(source, "r", encoding="utf-8")
+        owns_file = True
+    else:
+        fh = source
+        owns_file = False
+
+    metadata = _consume_header(fh)
+
+    def _series_generator():
+        seen_names: Dict[str, int] = {}
+        first_length: Optional[int] = None
+        try:
+            for raw_line in fh:
+                line = raw_line.rstrip("\n").rstrip("\r")
+                if not line:
+                    continue
+                series = _parse_data_line(line)
+
+                if series.series_name in seen_names:
+                    raise TsfParseError(f"Duplicate series_name entries found: [{series.series_name!r}]")
+                seen_names[series.series_name] = 1
+
+                if metadata.equallength:
+                    if first_length is None:
+                        first_length = len(series.values)
+                    elif len(series.values) != first_length:
+                        raise TsfParseError(
+                            f"@equallength is true but series {series.series_name!r} has length "
+                            f"{len(series.values)}, expected {first_length}"
+                        )
+
+                yield series
+        finally:
+            if owns_file:
+                fh.close()
+
+    return metadata, _series_generator()
