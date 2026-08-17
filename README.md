@@ -125,6 +125,26 @@ Per the locked SolarShare specification, several values that will be introduced 
    ```
 6. Compare the printed `series` count against the expected **321** and the frequency against **hourly** — if either differs from what's documented here, that's a genuine discrepancy worth reporting back, not something to silently reconcile.
 
+### Running the 321→6 load-profile selection (after real ingestion)
+
+Once the real dataset is ingested (§ above), run the shape-aware profiling/clustering pipeline against your real 321-series data:
+
+```bash
+python -c "
+from app.db.session import SessionLocal
+from app.services.load_profiling import run_profiling_pipeline
+import json
+
+db = SessionLocal()
+summary = run_profiling_pipeline(db, persist=True)
+print(json.dumps(summary, indent=2, default=str))
+"
+```
+
+This is strictly read-only against `PublicLoadObservation` (verified by an automated test asserting the row count is identical before/after) and writes results only to `PublicLoadSeriesProfile`. The methodology is fully documented in `app/services/load_profiling.py`'s module docstring: weekday/weekend 24-hour median shapes (normalized by own mean), PCA reduction (≥90% variance retained, deterministic sign convention), block-balanced combination with CV/PAR, deterministic Ward hierarchical clustering at k=6, and selection of the real series nearest each cluster centroid. Re-running is idempotent (upserts, doesn't duplicate) and deterministic (same input → same six selected series every time).
+
+**Note:** this pipeline has only been tested in this environment against small synthetic fixtures (see `tests/test_load_profiling.py`) with deliberately distinct, controllable patterns — not against the real 321-series data, which is only available in your environment. Please share the `summary` output (especially `selected_profiles` and `validation_checks`) after running it against the real data so it can be reviewed.
+
 
 
 - **Phase 1 (this phase):** foundational architecture — done, pending your review.

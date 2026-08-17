@@ -15,6 +15,7 @@ from app.models.tariff import Tariff, TariffPeriod, SolarTariffConfig  # noqa: F
 from app.models.user import User  # noqa: F401
 from app.models.weather import WeatherObservation, NasaPowerCache, SolarGenerationEstimate  # noqa: F401
 from app.models.public_load import PublicLoadSeries, PublicLoadObservation  # noqa: F401
+from app.models.load_profile import PublicLoadSeriesProfile  # noqa: F401
 
 __all__ = [
     "Estate",
@@ -30,4 +31,5 @@ __all__ = [
     "SolarGenerationEstimate",
     "PublicLoadSeries",
     "PublicLoadObservation",
+    "PublicLoadSeriesProfile",
 ]
