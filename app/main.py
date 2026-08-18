@@ -16,10 +16,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.routes_allocation import router as allocation_router
+from app.api.routes_analytics import router as analytics_router
 from app.api.routes_auth import router as auth_router
+from app.api.routes_battery import router as battery_router
+from app.api.routes_billing import router as billing_router
+from app.api.routes_dashboard import router as dashboard_router
 from app.api.routes_data import router as data_router
 from app.api.routes_demo import router as demo_router
+from app.api.routes_forecasting import router as forecasting_router
 from app.api.routes_health import router as health_router
+from app.api.routes_load_profiles import router as load_profiles_router
+from app.api.routes_solar import router as solar_router
 from app.core.config import settings
 from app.core.logging_config import configure_logging
 from app.db.init_db import init_db
@@ -40,10 +48,9 @@ app = FastAPI(
     title=settings.app_name,
     description=(
         "SolarShare — Shared Solar Energy Forecasting, Fair Allocation and "
-        "Time-of-Use Billing Platform for MSME Industrial Estates. "
-        "Phase 1: foundational architecture."
+        "Time-of-Use Billing Platform for MSME Industrial Estates."
     ),
-    version="0.1.0-phase1",
+    version="0.2.0-phase2",
     lifespan=lifespan,
 )
 
@@ -78,6 +85,14 @@ app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(demo_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
+app.include_router(load_profiles_router, prefix="/api")
+app.include_router(solar_router, prefix="/api")
+app.include_router(forecasting_router, prefix="/api")
+app.include_router(allocation_router, prefix="/api")
+app.include_router(battery_router, prefix="/api")
+app.include_router(billing_router, prefix="/api")
+app.include_router(analytics_router, prefix="/api")
+app.include_router(dashboard_router, prefix="/api")
 
 
 @app.get("/")
