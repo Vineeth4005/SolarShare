@@ -11,6 +11,8 @@ from app.db.session import get_db
 from app.models.tenant import Tenant
 from app.schemas.forecasting import ForecastDataPoint, SolarForecastResponse, TenantForecastResponse
 
+from app.services.solar_forecasting import generate_solar_forecast
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/forecasting", tags=["forecasting"])
@@ -20,50 +22,10 @@ router = APIRouter(prefix="/forecasting", tags=["forecasting"])
 def get_solar_forecast(
     estate_id: int = Query(1, ge=1),
     hours: int = Query(24, ge=1, le=168),
+    db: Session = Depends(get_db),
 ) -> SolarForecastResponse:
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
-    data: List[ForecastDataPoint] = []
-    total_kwh = 0.0
-    peak_kw = 0.0
-
-    # Solar bell curve for next 24 hours
-    solar_factors = [
-        0, 0, 0, 0, 0, 0,
-        0.05, 0.20, 0.45, 0.70, 0.88, 0.96,
-        1.00, 0.95, 0.85, 0.65, 0.38, 0.15,
-        0.02, 0, 0, 0, 0, 0
-    ]
-
-    for i in range(hours):
-        ts = now + timedelta(hours=i)
-        hour_of_day = ts.hour
-        factor = solar_factors[hour_of_day % 24]
-        pred = round(380.0 * factor, 2)
-        lower = round(max(0.0, pred * 0.85), 2)
-        upper = round(pred * 1.15, 2)
-
-        if pred > peak_kw:
-            peak_kw = pred
-        total_kwh += pred
-
-        data.append(
-            ForecastDataPoint(
-                timestamp=ts.strftime("%Y-%m-%dT%H:00:00"),
-                predicted_value_kw=pred,
-                lower_bound_kw=lower,
-                upper_bound_kw=upper,
-            )
-        )
-
-    return SolarForecastResponse(
-        estate_id=estate_id,
-        forecast_period_hours=hours,
-        forecast_data=data,
-        total_generation_forecast_kwh=round(total_kwh, 2),
-        peak_generation_kw=peak_kw,
-        is_demo=True,
-        explanatory_note="Prototype demo response — Prophet solar generation forecasting model is not yet connected.",
-    )
+    """Get real Prophet 24-hour solar generation forecast."""
+    return generate_solar_forecast(db, estate_id=estate_id, hours=hours)
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantForecastResponse)

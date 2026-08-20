@@ -18,6 +18,11 @@ class SolarForecastResponse(DemoResponseMixin):
     forecast_data: List[ForecastDataPoint]
     total_generation_forecast_kwh: float
     peak_generation_kw: float
+    model_name: str = "Prophet"
+    training_record_count: Optional[int] = None
+    training_start_date: Optional[str] = None
+    training_end_date: Optional[str] = None
+    generated_at: Optional[str] = None
 
 
 class TenantForecastResponse(DemoResponseMixin):
